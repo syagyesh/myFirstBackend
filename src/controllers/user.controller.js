@@ -3,6 +3,7 @@ import ApiResponse from "../utils/ApiResponse.js";
 import ApiError from "../utils/ApiError.js";
 import { User } from "../models/user.model.js";
 import uploadOnCloudinary from "../utils/cloudinary.js";
+import jwt from "jsonwebtoken";
 
 const generateAccessAndRefreshToken = async (user) => {
   const accessToken = user.generateAccessToken();
@@ -10,6 +11,8 @@ const generateAccessAndRefreshToken = async (user) => {
 
   user.refreshToken = refreshToken;
   await user.save();
+
+  return { accessToken, refreshToken };
 };
 
 const registerUser = asyncHandler(async (req, res) => {
@@ -38,8 +41,15 @@ const registerUser = asyncHandler(async (req, res) => {
   if (existedUser) {
     throw new ApiError(409, "User already exists.");
   }
-
-  const avatarLocalPath = req.files?.avatar[0]?.path;
+  let avatarLocalPath;
+  if (
+    req.files &&
+    Array.isArray(req.files.avatar) &&
+    req.files.avatar.length > 0
+  ) {
+    avatarLocalPath = req.files.avatar[0].path;
+  }
+  // const avatarLocalPath = req.files?.avatar[0]?.path;
   let coverImageLocalPath;
   if (
     req.files &&
@@ -100,7 +110,7 @@ const loginUser = asyncHandler(async (req, res) => {
   }
 
   const user = await User.findOne({
-    $or: [{ username: username.toLowerCase() }, { email }],
+    $or: [{ username }, { email }],
   });
 
   if (!user) {
@@ -116,8 +126,10 @@ const loginUser = asyncHandler(async (req, res) => {
   const { accessToken, refreshToken } =
     await generateAccessAndRefreshToken(user);
 
-  // const loggedInUser = await User.findById(user._id).select("-password -refreshToken");
-  const loggedInUser = user.select("-password");
+  const loggedInUser = await User.findById(user._id).select(
+    "-password -refreshToken"
+  );
+  // const loggedInUser = user.select("-password");
 
   const options = {
     httpOnly: true,
@@ -185,4 +197,52 @@ const logoutUser = asyncHandler(async (req, res) => {
   //   .json(new ApiResponse(200, null, "Logout successful."));
 });
 
-export { registerUser, loginUser, logoutUser };
+const refreshAccessToken = asyncHandler(async (req, res) => {
+  const incomingRefreshToken =
+    req.cookies.refreshToken || req.body.refreshToken;
+
+  if (!incomingRefreshToken) {
+    throw new ApiError(401, "unauthorized access");
+  }
+
+  try {
+    const decodedToken = jwt.verify(
+      incomingRefreshToken,
+      process.env.REFRESH_TOKEN_SECRET
+    );
+
+    const user = await User.findById(decodedToken?.id);
+
+    if (!user) {
+      throw new ApiError(401, "inValid refresh token");
+    }
+
+    if (incomingRefreshToken !== user.refreshToken) {
+      throw new ApiError(401, "Refresh Token is expired or used.");
+    }
+
+    const options = {
+      httpOnly: true,
+      secure: true,
+    };
+
+    const { accessToken, newRefreshToken } =
+      await generateAccessAndRefreshToken(user);
+
+    return res
+      .status(200)
+      .cookie("accessToken", accessToken, options)
+      .cookie("refreshToken", newRefreshToken, options)
+      .json(
+        new ApiResponse(
+          200,
+          { accessToken, refreshToken: newRefreshToken },
+          "Token refreshed."
+        )
+      );
+  } catch (error) {
+    throw new ApiError(401, error?.message || "Unauthorized access.");
+  }
+});
+
+export { registerUser, loginUser, logoutUser, refreshAccessToken };
